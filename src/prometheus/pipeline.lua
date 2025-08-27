@@ -39,11 +39,35 @@ local Pipeline = {
 		PrettyPrint = false; -- Note that Pretty Print is currently not producing Pretty results
 		Seed = 0; -- The Seed. 0 or below uses the current time as a seed
 		VarNamePrefix = ""; -- The Prefix that every variable will start with
+		MaxIterations = 1000; -- Maximum iterations for loops to prevent infinite loops
+		MemoryLimit = 100 * 1024 * 1024; -- 100MB memory limit for large files
 	}
 }
 
+-- Validate configuration
+local function validateConfig(config)
+	if not config then
+		return false, "Configuration is required";
+	end
+	
+	if config.LuaVersion and not Enums.Conventions[config.LuaVersion] then
+		return false, string.format("Invalid Lua version: %s", config.LuaVersion);
+	end
+	
+	if config.Steps and type(config.Steps) ~= "table" then
+		return false, "Steps must be a table";
+	end
+	
+	if config.VarNamePrefix and type(config.VarNamePrefix) ~= "string" then
+		return false, "VarNamePrefix must be a string";
+	end
+	
+	return true;
+end
 
 function Pipeline:new(settings)
+	settings = settings or {};
+	
 	local luaVersion = settings.luaVersion or settings.LuaVersion or Pipeline.DefaultSettings.LuaVersion;
 	local conventions = Enums.Conventions[luaVersion];
 	if(not conventions) then
@@ -54,12 +78,16 @@ function Pipeline:new(settings)
 	local prettyPrint = settings.PrettyPrint or Pipeline.DefaultSettings.PrettyPrint;
 	local prefix = settings.VarNamePrefix or Pipeline.DefaultSettings.VarNamePrefix;
 	local seed = settings.Seed or 0;
+	local maxIterations = settings.MaxIterations or Pipeline.DefaultSettings.MaxIterations;
+	local memoryLimit = settings.MemoryLimit or Pipeline.DefaultSettings.MemoryLimit;
 	
 	local pipeline = {
 		LuaVersion = luaVersion;
 		PrettyPrint = prettyPrint;
 		VarNamePrefix = prefix;
 		Seed = seed;
+		MaxIterations = maxIterations;
+		MemoryLimit = memoryLimit;
 		parser = Parser:new({
 			LuaVersion = luaVersion;
 		});
@@ -71,6 +99,15 @@ function Pipeline:new(settings)
 		namegenerator = Pipeline.NameGenerators.MangledShuffled;
 		conventions = conventions;
 		steps = {};
+		stats = {
+			startTime = 0,
+			parseTime = 0,
+			stepTimes = {},
+			renameTime = 0,
+			unparseTime = 0,
+			totalTime = 0,
+			memoryUsage = 0
+		};
 	}
 	
 	setmetatable(pipeline, self);
@@ -80,12 +117,19 @@ function Pipeline:new(settings)
 end
 
 function Pipeline:fromConfig(config)
+	local valid, err = validateConfig(config);
+	if not valid then
+		logger:error("Invalid configuration: " .. err);
+	end
+	
 	config = config or {};
 	local pipeline = Pipeline:new({
 		LuaVersion    = config.LuaVersion or LuaVersion.Lua51;
 		PrettyPrint   = config.PrettyPrint or false;
 		VarNamePrefix = config.VarNamePrefix or "";
 		Seed          = config.Seed or 0;
+		MaxIterations = config.MaxIterations or Pipeline.DefaultSettings.MaxIterations;
+		MemoryLimit   = config.MemoryLimit or Pipeline.DefaultSettings.MemoryLimit;
 	});
 
 	pipeline:setNameGenerator(config.NameGenerator or "MangledShuffled")
@@ -100,6 +144,12 @@ function Pipeline:fromConfig(config)
 		if not constructor then
 			logger:error(string.format("The Step \"%s\" was not found!", step.Name));
 		end
+		
+		-- Validate step settings
+		if step.Settings and type(step.Settings) ~= "table" then
+			logger:error(string.format("Step \"%s\" settings must be a table", step.Name));
+		end
+		
 		pipeline:addStep(constructor:new(step.Settings or {}));
 	end
 
@@ -107,10 +157,18 @@ function Pipeline:fromConfig(config)
 end
 
 function Pipeline:addStep(step)
+	if not step or type(step) ~= "table" then
+		logger:error("Step must be a valid step object");
+	end
+	
+	if not step.apply or type(step.apply) ~= "function" then
+		logger:error("Step must have an apply method");
+	end
+	
 	table.insert(self.steps, step);
 end
 
-function Pipeline:resetSteps(step)
+function Pipeline:resetSteps()
 	self.steps = {};
 end
 
@@ -119,11 +177,10 @@ function Pipeline:getSteps()
 end
 
 function Pipeline:setOption(name, value)
-	assert(false, "TODO");
 	if(Pipeline.DefaultSettings[name] ~= nil) then
-		
+		self[name] = value;
 	else
-		logger:error(string.format("\"%s\" is not a valid setting"));
+		logger:error(string.format("\"%s\" is not a valid setting", name));
 	end
 end
 
@@ -141,10 +198,11 @@ function Pipeline:setLuaVersion(luaVersion)
 		luaVersion = luaVersion;
 	});
 	self.conventions = conventions;
+	self.LuaVersion = luaVersion;
 end
 
 function Pipeline:getLuaVersion()
-	return self.luaVersion;
+	return self.LuaVersion;
 end
 
 function Pipeline:setNameGenerator(nameGenerator)
@@ -160,10 +218,30 @@ function Pipeline:setNameGenerator(nameGenerator)
 	end
 end
 
+-- Memory usage monitoring
+local function getMemoryUsage()
+	if collectgarbage then
+		collectgarbage("collect");
+		return collectgarbage("count") * 1024; -- Convert KB to bytes
+	end
+	return 0;
+end
+
 function Pipeline:apply(code, filename)
-	local startTime = gettime();
-	filename = filename or "Anonymus Script";
+	self.stats.startTime = gettime();
+	filename = filename or "Anonymous Script";
+	
+	-- Validate input
+	if not code or type(code) ~= "string" then
+		logger:error("Code must be a non-empty string");
+	end
+	
+	if #code == 0 then
+		logger:error("Code cannot be empty");
+	end
+	
 	logger:info(string.format("Applying Obfuscation Pipeline to %s ...", filename));
+	
 	-- Seed the Random Generator
 	if(self.Seed > 0) then
 		math.randomseed(self.Seed);
@@ -171,24 +249,44 @@ function Pipeline:apply(code, filename)
 		math.randomseed(os.time())
 	end
 	
+	-- Monitor memory usage
+	self.stats.memoryUsage = getMemoryUsage();
+	
 	logger:info("Parsing ...");
 	local parserStartTime = gettime();
 
 	local sourceLen = string.len(code);
 	local ast = self.parser:parse(code);
 
-	local parserTimeDiff = gettime() - parserStartTime;
-	logger:info(string.format("Parsing Done in %.2f seconds", parserTimeDiff));
+	self.stats.parseTime = gettime() - parserStartTime;
+	logger:info(string.format("Parsing Done in %.2f seconds", self.stats.parseTime));
 	
-	-- User Defined Steps
+	-- User Defined Steps with better error handling
 	for i, step in ipairs(self.steps) do
 		local stepStartTime = gettime();
-		logger:info(string.format("Applying Step \"%s\" ...", step.Name or "Unnamed"));
-		local newAst = step:apply(ast, self);
+		local stepName = step.Name or "Unnamed";
+		logger:info(string.format("Applying Step \"%s\" ...", stepName));
+		
+		-- Check memory usage
+		local currentMemory = getMemoryUsage();
+		if currentMemory > self.MemoryLimit then
+			logger:error(string.format("Memory limit exceeded (%d bytes) during step \"%s\"", currentMemory, stepName));
+		end
+		
+		local success, newAst = pcall(function()
+			return step:apply(ast, self);
+		end);
+		
+		if not success then
+			logger:error(string.format("Step \"%s\" failed: %s", stepName, newAst));
+		end
+		
 		if type(newAst) == "table" then
 			ast = newAst;
 		end
-		logger:info(string.format("Step \"%s\" Done in %.2f seconds", step.Name or "Unnamed", gettime() - stepStartTime));
+		
+		self.stats.stepTimes[stepName] = gettime() - stepStartTime;
+		logger:info(string.format("Step \"%s\" Done in %.2f seconds", stepName, self.stats.stepTimes[stepName]));
 	end
 	
 	-- Rename Variables Step
@@ -196,10 +294,16 @@ function Pipeline:apply(code, filename)
 	
 	code = self:unparse(ast);
 	
-	local timeDiff = gettime() - startTime;
-	logger:info(string.format("Obfuscation Done in %.2f seconds", timeDiff));
+	self.stats.totalTime = gettime() - self.stats.startTime;
+	logger:info(string.format("Obfuscation Done in %.2f seconds", self.stats.totalTime));
 	
 	logger:info(string.format("Generated Code size is %.2f%% of the Source Code size", (string.len(code) / sourceLen)*100))
+	
+	-- Final memory check
+	self.stats.memoryUsage = getMemoryUsage();
+	if self.stats.memoryUsage > self.MemoryLimit then
+		logger:warn(string.format("Final memory usage (%d bytes) exceeds limit (%d bytes)", self.stats.memoryUsage, self.MemoryLimit));
+	end
 	
 	return code;
 end
@@ -210,8 +314,8 @@ function Pipeline:unparse(ast)
 	
 	local unparsed = self.unparser:unparse(ast);
 	
-	local timeDiff = gettime() - startTime;
-	logger:info(string.format("Code Generation Done in %.2f seconds", timeDiff));
+	self.stats.unparseTime = gettime() - startTime;
+	logger:info(string.format("Code Generation Done in %.2f seconds", self.stats.unparseTime));
 	
 	return unparsed;
 end
@@ -219,7 +323,6 @@ end
 function Pipeline:renameVariables(ast)
 	local startTime = gettime();
 	logger:info("Renaming Variables ...");
-	
 	
 	local generatorFunction = self.namegenerator or Pipeline.NameGenerators.mangled;
 	if(type(generatorFunction) == "table") then
@@ -240,11 +343,26 @@ function Pipeline:renameVariables(ast)
 		prefix = self.VarNamePrefix;
 	});
 	
-	local timeDiff = gettime() - startTime;
-	logger:info(string.format("Renaming Done in %.2f seconds", timeDiff));
+	self.stats.renameTime = gettime() - startTime;
+	logger:info(string.format("Renaming Done in %.2f seconds", self.stats.renameTime));
 end
 
+-- Get pipeline statistics
+function Pipeline:getStats()
+	return self.stats;
+end
 
-
+-- Reset pipeline statistics
+function Pipeline:resetStats()
+	self.stats = {
+		startTime = 0,
+		parseTime = 0,
+		stepTimes = {},
+		renameTime = 0,
+		unparseTime = 0,
+		totalTime = 0,
+		memoryUsage = 0
+	};
+end
 
 return Pipeline;
