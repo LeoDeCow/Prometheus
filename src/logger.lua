@@ -5,6 +5,7 @@
 local logger = {}
 local config = require("config");
 local colors = require("colors");
+local Security = require("security");
 
 logger.LogLevel = {
 	Error = 0,
@@ -17,7 +18,8 @@ logger.LogLevel = {
 logger.logLevel = logger.LogLevel.Log;
 
 logger.debugCallback = function(...)
-	print(colors(config.NameUpper .. ": " ..  ..., "grey"));
+	local sanitized = Security.sanitize_string(...)
+	print(colors(config.NameUpper .. ": " ..  sanitized, "grey"));
 end;
 function logger:debug(...)
 	if self.logLevel >= self.LogLevel.Debug then
@@ -26,7 +28,8 @@ function logger:debug(...)
 end
 
 logger.logCallback = function(...)
-	print(colors(config.NameUpper .. ": ", "magenta") .. ...);
+	local sanitized = Security.sanitize_string(...)
+	print(colors(config.NameUpper .. ": ", "magenta") .. sanitized);
 end;
 function logger:log(...)
 	if self.logLevel >= self.LogLevel.Log then
@@ -41,7 +44,8 @@ function logger:info(...)
 end
 
 logger.warnCallback = function(...)
-	print(colors(config.NameUpper .. ": " .. ..., "yellow"));
+	local sanitized = Security.sanitize_string(...)
+	print(colors(config.NameUpper .. ": " .. sanitized, "yellow"));
 end;
 function logger:warn(...)
 	if self.logLevel >= self.LogLevel.Warn then
@@ -50,8 +54,9 @@ function logger:warn(...)
 end
 
 logger.errorCallback = function(...)
-	print(colors(config.NameUpper .. ": " .. ..., "red"))
-	error(...);
+	local sanitized = Security.sanitize_string(...)
+	print(colors(config.NameUpper .. ": " .. sanitized, "red"))
+	error(sanitized);
 end;
 function logger:error(...)
 	self.errorCallback(...);

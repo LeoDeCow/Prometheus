@@ -8,8 +8,14 @@ local NAME    = "Prometheus";
 local REVISION = "Alpha";
 local VERSION = "v0.2";
 local BY      = "levno-710";
+local Security = require("security");
 
 for _, currArg in pairs(arg) do
+    -- Security: Use security module for command line argument validation
+    if not Security.validate_cli_arg(currArg) then
+        goto continue
+    end
+    
 	if currArg == "--CI" then
 		local releaseName = string.gsub(string.format("%s %s %s", NAME, REVISION, VERSION), "%s", "-")
 		print(releaseName)
@@ -18,6 +24,8 @@ for _, currArg in pairs(arg) do
 	if currArg == "--FullVersion" then
 		print(VERSION)
 	end
+	
+	::continue::
 end
 
 -- Config Starts here
