@@ -11,16 +11,25 @@ end
 package.path = script_path() .. "?.lua;" .. package.path;
 ---@diagnostic disable-next-line: different-requires
 local Prometheus = require("prometheus");
+local Security = require("security");
 Prometheus.Logger.logLevel = Prometheus.Logger.LogLevel.Info;
 
 -- Check if the file exists
 local function file_exists(file)
+    if not Security.validate_filename(file) then
+        return false
+    end
+    
     local f = io.open(file, "rb")
     if f then f:close() end
     return f ~= nil
 end
 
 string.split = function(str, sep)
+    if not str or type(str) ~= "string" or not sep or type(sep) ~= "string" then
+        return {}
+    end
+    
     local fields = {}
     local pattern = string.format("([^%s]+)", sep)
     str:gsub(pattern, function(c) fields[#fields+1] = c end)
@@ -51,6 +60,11 @@ Prometheus.colors.enabled = true;
 local i = 1;
 while i <= #arg do
     local curr = arg[i];
+    if not curr or type(curr) ~= "string" then
+        i = i + 1;
+        goto continue;
+    end
+    
     if curr:sub(1, 2) == "--" then
         if curr == "--preset" or curr == "--p" then
             if config then
@@ -58,31 +72,59 @@ while i <= #arg do
             end
 
             i = i + 1;
-            local preset = Prometheus.Presets[arg[i]];
+            local preset_name = arg[i];
+            if not preset_name or type(preset_name) ~= "string" then
+                Prometheus.Logger:error("Invalid preset name provided");
+            end
+            
+            local preset = Prometheus.Presets[preset_name];
             if not preset then
-                Prometheus.Logger:error(string.format("A Preset with the name \"%s\" was not found!", tostring(arg[i])));
+                Prometheus.Logger:error(string.format("A Preset with the name \"%s\" was not found!", tostring(preset_name)));
             end
 
             config = preset;
         elseif curr == "--config" or curr == "--c" then
             i = i + 1;
             local filename = tostring(arg[i]);
+            if not filename or not Security.validate_filename(filename) then
+                Prometheus.Logger:error("Invalid config filename provided");
+            end
+            
             if not file_exists(filename) then
                 Prometheus.Logger:error(string.format("The config file \"%s\" was not found!", filename));
             end
 
             local content = table.concat(lines_from(filename), "\n");
-            -- Load Config from File
-            local func = loadstring(content);
-            -- Sandboxing
-            setfenv(func, {});
-            config = func();
+            
+            -- Security: Use security module for safer configuration loading
+            local func, err = loadstring(content);
+            if not func then
+                Prometheus.Logger:error(string.format("Failed to load config file: %s", err or "Unknown error"));
+            end
+            
+            -- Create secure sandbox environment using security module
+            local sandbox = Security.create_sandbox();
+            
+            -- Set the function environment to the sandbox
+            setfenv(func, sandbox);
+            
+            -- Execute in protected mode
+            local success, result = pcall(func);
+            if not success then
+                Prometheus.Logger:error(string.format("Failed to execute config file: %s", result or "Unknown error"));
+            end
+            
+            config = result;
         elseif curr == "--out" or curr == "--o" then
             i = i + 1;
             if(outFile) then
                 Prometheus.Logger:warn("The output file was specified multiple times!");
             end
-            outFile = arg[i];
+            local output_file = arg[i];
+            if not output_file or not Security.validate_filename(output_file) then
+                Prometheus.Logger:error("Invalid output filename provided");
+            end
+            outFile = output_file;
         elseif curr == "--nocolors" then
             Prometheus.colors.enabled = false;
         elseif curr == "--Lua51" then
@@ -100,9 +142,17 @@ while i <= #arg do
                 local message = table.concat(args, " ");
                 
                 local fileName = sourceFile:sub(-4) == ".lua" and sourceFile:sub(0, -5) .. ".error.txt" or sourceFile .. ".error.txt";
+                
+                -- Security: Use security module for error filename validation
+                if not Security.validate_filename(fileName) then
+                    fileName = "error.txt"; -- Fallback to safe filename
+                end
+                
                 local handle = io.open(fileName, "w");
-                handle:write(message);
-                handle:close();
+                if handle then
+                    handle:write(message);
+                    handle:close();
+                end
 
                 os.exit(1);
             end;
@@ -113,9 +163,16 @@ while i <= #arg do
         if sourceFile then
             Prometheus.Logger:error(string.format("Unexpected argument \"%s\"", arg[i]));
         end
-        sourceFile = tostring(arg[i]);
+        
+        -- Security: Use security module for source file validation
+        local source_file = tostring(arg[i]);
+        if not Security.validate_filename(source_file) then
+            Prometheus.Logger:error("Invalid source filename provided");
+        end
+        sourceFile = source_file;
     end
     i = i + 1;
+    ::continue::
 end
 
 if not sourceFile then
@@ -143,12 +200,18 @@ if not outFile then
     end
 end
 
+-- Security: Use security module for final output file validation
+if not Security.validate_filename(outFile) then
+    Prometheus.Logger:error("Invalid output filename generated");
+end
+
 local source = table.concat(lines_from(sourceFile), "\n");
 local pipeline = Prometheus.Pipeline:fromConfig(config);
 local out = pipeline:apply(source, sourceFile);
 Prometheus.Logger:info(string.format("Writing output to \"%s\"", outFile));
 
--- Write Output
-local handle = io.open(outFile, "w");
-handle:write(out);
-handle:close();
+-- Security: Use security module for secure file writing
+local success, err = Security.secure_file_write(outFile, out);
+if not success then
+    Prometheus.Logger:error(string.format("Failed to write output file: %s", err or "Unknown error"));
+end
