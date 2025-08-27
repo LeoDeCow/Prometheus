@@ -46,7 +46,6 @@ _G.newproxy = _G.newproxy or function(arg)
     return {};
 end
 
-
 -- Require Prometheus Submodules
 local Pipeline  = require("prometheus.pipeline");
 local highlight = require("highlightlua");
@@ -55,9 +54,16 @@ local Logger    = require("logger");
 local Presets   = require("presets");
 local Config    = require("config");
 local util      = require("prometheus.util");
+local Validation = require("prometheus.validation");
+local Performance = require("prometheus.performance");
 
 -- Restore package.path
 package.path = oldPkgPath;
+
+-- Initialize performance monitoring
+if Config.EnableProfiling then
+    Performance.Profiler:start();
+end
 
 -- Export
 return {
@@ -67,5 +73,14 @@ return {
     Logger    = Logger;
     highlight = highlight;
     Presets   = Presets;
+    Validation = Validation;
+    Performance = Performance;
+    
+    -- Utility functions for easy access
+    validateFile = Validation.validateFile;
+    validateCode = Validation.validateCode;
+    validateConfig = Validation.validateConfig;
+    getPerformanceReport = Performance.generateReport;
+    printPerformanceReport = Performance.printReport;
 }
 
